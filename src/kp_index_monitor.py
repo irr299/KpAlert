@@ -94,6 +94,13 @@ class KpMonitor:
     IMAGE_PATH_SWPC = "/Users/infantronald/work/KP index/KpAlert/mock_files/kp_swift_ensemble_with_swpc_LAST.png"
     CSV_PATH = "/Users/infantronald/work/KP index/KpAlert/mock_files/kp_product_file_SWIFT_LAST.csv"
 
+    # Caption for the forecast plot (SWPC + Min-Max)
+    FORECAST_IMAGE_CAPTION = (
+        "<strong>Caption:</strong> Kp index forecast: bar colours show activity level (green = quiet, yellow = moderate, "
+        "red = high). Red dashed line = SWPC (NOAA) official Kp forecast. Black vertical lines "
+        "on bars = Min–Max range (possible spread of Kp values; longer = more uncertainty)."
+    )
+
     def __init__(self, config: MonitorConfig, log_suffix: str = "") -> None:
         self.last_alert_time = None
         self.last_max_kp = 0
@@ -348,7 +355,7 @@ In no event will GFZ be liable for any damages direct, indirect, incidental, or 
 
         max_kp_at_finite_time = np.round(max_values.max(), 2)
 
-        max_kp_at_finite_time_status, _, _ = self.get_status_level_color(max_kp_at_finite_time)
+        max_kp_at_finite_time_status, max_kp_at_finite_time_level, _ = self.get_status_level_color(max_kp_at_finite_time)
         mask = probability_df["Probability"] >= 0.4
         if mask.any():
             start_time = probability_df.index[mask][0]
@@ -375,27 +382,31 @@ In no event will GFZ be liable for any damages direct, indirect, incidental, or 
                 f"""From {start_time.strftime("%H:%M (CET) %d-%m-%Y")}  to {end_time.strftime("%H:%M (CET) %d-%m-%Y")} """
             )
         if observed_time != analysis.next_24h_forecast.index[0]:
-            obs_message_prefix = f""" (Observed Kp data available up to {datetime.strptime(observed_time.strip(), "%Y-%m-%dT%H:%M:%SZ").strftime("%H:%M (CET) %d-%m-%Y")} )"""
+            obs_message_prefix = f""" (Observed Kp data available up to {datetime.strptime(observed_time.strip(), "%Y-%m-%dT%H:%M:%SZ").strftime("%H:%M CET %d-%m-%Y")})"""
         else:
             obs_message_prefix = ""
 
-        message = f"""<h2 style="color: #d9534f;">SPACE WEATHER ALERT - {threshold_status} with ≥ {prob_at_start_time * 100:.0f}% probability Predicted</h2>
+        # Use "=" for Kp 9 (maximum value), "≥" for all other values
+        kp_comparison = "=" if max_kp_at_finite_time == 9 else "≥"
+
+        message = f"""<h2 style="color: #d9534f;">SPACE WEATHER ALERT - {end_time_kp_max_status} ({max_kp_at_finite_time_level}) with ≥ {prob_at_start_time * 100:.0f}% probability Predicted</h2>
 
 
-### {message_prefix} space weather conditions can reach {end_time_kp_max_status} level {self.config.kp_alert_threshold} ({threshold_level}) with ≥ {prob_at_start_time * 100:.0f}% probability.
+### {message_prefix}, space weather conditions can reach {end_time_kp_max_status} with Kp {kp_comparison} {DECIMAL_TO_KP[max_kp_at_finite_time]} ({max_kp_at_finite_time_level}) with ≥ {prob_at_start_time * 100:.0f}% probability.
 
 **Current Conditions:** {observed_status.replace("CONDITIONS", "")} {obs_message_prefix}
 
-## **ALERT SUMMARY**
-
-- **{high_prob_value * 100:.0f}% Probability of {threshold_status} ({threshold_level}) within next {prob_at_time} hours**
-- **Alert sent at:** {datetime.now(timezone.utc).strftime("%H:%M (CET) %d-%m-%Y ")}
-
-
 ![Forecast Image](cid:forecast_image)
 
+<p class="forecast-caption">{self.FORECAST_IMAGE_CAPTION}</p>
+
+## **ALERT SUMMARY**
+- **Alert sent at:** {datetime.now(timezone.utc).strftime("%H:%M CET %d-%m-%Y ")}
+- **{high_prob_value * 100:.0f}% Probability of {end_time_kp_max_status} ({max_kp_at_finite_time_level}) within next {prob_at_time} hours**
+
+
 """
-        message += self._kp_html_table(high_records, probability_df)
+        #message += self._kp_html_table(high_records, probability_df)
 
         AURORA_KP = 7
         high_records_above_threshold = high_records[
@@ -667,15 +678,16 @@ In no event will GFZ be liable for any damages direct, indirect, incidental, or 
             <html>
             <head>
                 <style>
-                    body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #000000; max-width: 1200px; margin: 0 auto; padding: 20px; }}
-                    table {{ border-collapse: collapse; margin: 20px 0; width: 100%; }}
+                    body {{ font-family: Arial, sans-serif; font-size: 14px; line-height: 1.6; color: #000000; max-width: 1200px; margin: 0 auto; padding: 20px; }}
+                    table {{ border-collapse: collapse; margin: 20px 0; width: 100%; font-size: 13px; }}
                     th, td {{ padding: 8px 12px; border: 1px solid #ddd; text-align: left; }}
                     th {{ background-color: #f0f0f0; font-weight: bold; }}
                     img {{ max-width: 100%; height: auto; }}
-                    h1 {{ color: #d9534f; }}
-                    h2 {{ color: #5bc0de; margin-top: 30px; }}
-                    h3 {{ color: #000000; }}
-                    small {{ font-size: 12px; color: #333; }}
+                    h1 {{ color: #d9534f; font-size: 1.5rem; }}
+                    h2 {{ color: #5bc0de; margin-top: 30px; font-size: 1.25rem; }}
+                    h3 {{ color: #000000; font-size: 1.1rem; }}
+                    .forecast-caption {{ font-size: 12px; color: #555; margin-top: 4px; }}
+                    small {{ font-size: 11px; color: #333; }}
                     hr {{ border: 0; border-top: 1px solid #ddd; margin: 20px 0; }}
                 </style>
             </head>
