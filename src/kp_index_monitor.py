@@ -90,9 +90,9 @@ class KpMonitor:
     for geomagnetic activity monitoring.
     """
 
-    IMAGE_PATH = "/PAGER/FLAG/data/published/kp_swift_ensemble_LAST.png"
-    IMAGE_PATH_SWPC = "/PAGER/FLAG/data/published/kp_swift_ensemble_with_swpc_LAST.png"
-    CSV_PATH = "/PAGER/FLAG/data/published/products/Kp/kp_product_file_SWIFT_LAST.csv"
+    IMAGE_PATH = "/Users/infantronald/work/KP index/KpAlert/mock_files/kp_swift_ensemble_LAST.png"
+    IMAGE_PATH_SWPC = "/Users/infantronald/work/KP index/KpAlert/mock_files/kp_swift_ensemble_with_swpc_LAST.png"
+    CSV_PATH = "/Users/infantronald/work/KP index/KpAlert/mock_files/kp_product_file_SWIFT_LAST.csv"
 
     def __init__(self, config: MonitorConfig, log_suffix: str = "") -> None:
         self.last_alert_time = None
@@ -369,17 +369,17 @@ In no event will GFZ be liable for any damages direct, indirect, incidental, or 
         end_time_kp_max_status, _, _ = self.get_status_level_color(high_records.loc[end_time]["maximum"].max())
 
         if start_time == end_time:
-            message_prefix = f"""At {start_time.strftime("%H:%M CET %d-%m-%Y")} """
+            message_prefix = f"""At {start_time.strftime("%H:%M (CET) %d-%m-%Y")} """
         else:
             message_prefix = (
-                f"""From {start_time.strftime("%H:%M CET %d-%m-%Y")}  to {end_time.strftime("%H:%M CET %d-%m-%Y")} """
+                f"""From {start_time.strftime("%H:%M (CET) %d-%m-%Y")}  to {end_time.strftime("%H:%M (CET) %d-%m-%Y")} """
             )
         if observed_time != analysis.next_24h_forecast.index[0]:
-            obs_message_prefix = f""" (Observed Kp data available up to {datetime.strptime(observed_time.strip(), "%Y-%m-%dT%H:%M:%SZ").strftime("%Y-%m-%d %H:%M")} UTC)"""
+            obs_message_prefix = f""" (Observed Kp data available up to {datetime.strptime(observed_time.strip(), "%Y-%m-%dT%H:%M:%SZ").strftime("%H:%M (CET) %d-%m-%Y")} )"""
         else:
             obs_message_prefix = ""
 
-        message = f"""<h2 style="color: #d9534f;">SPACE WEATHER ALERT - {threshold_status} ({threshold_level}) Predicted</h2>
+        message = f"""<h2 style="color: #d9534f;">SPACE WEATHER ALERT - {threshold_status} with ≥ {prob_at_start_time * 100:.0f}% probability Predicted</h2>
 
 
 ### {message_prefix} space weather conditions can reach {end_time_kp_max_status} level {self.config.kp_alert_threshold} ({threshold_level}) with ≥ {prob_at_start_time * 100:.0f}% probability.
@@ -389,15 +389,26 @@ In no event will GFZ be liable for any damages direct, indirect, incidental, or 
 ## **ALERT SUMMARY**
 
 - **{high_prob_value * 100:.0f}% Probability of {threshold_status} ({threshold_level}) within next {prob_at_time} hours**
-- **Alert sent at:** {datetime.now(timezone.utc).strftime("%H:%M CET %d-%m-%Y ")}
+- **Alert sent at:** {datetime.now(timezone.utc).strftime("%H:%M (CET) %d-%m-%Y ")}
 
 
 ![Forecast Image](cid:forecast_image)
 
+"""
+        message += self._kp_html_table(high_records, probability_df)
 
+        AURORA_KP = 7
+        high_records_above_threshold = high_records[
+            (high_records["minimum"].astype(float) >= AURORA_KP)
+            | (high_records["median"].astype(float) >= AURORA_KP)
+            | (high_records["maximum"].astype(float) >= AURORA_KP)
+        ]
+
+        if not high_records_above_threshold.empty:
+            message += f"""
 ## **AURORA WATCH:**
 
-**Note:** Kp ≥ {DECIMAL_TO_KP[AURORA_KP]} indicates potential auroral activity at Berlin latitudes.
+**Note:** Kp ≥ {DECIMAL_TO_KP[AURORA_KP]} indicate potential auroral activity at Berlin latitudes.
 
 """
 
