@@ -375,7 +375,7 @@ In no event will GFZ be liable for any damages direct, indirect, incidental, or 
                 f"""From {start_time.strftime("%H:%M CET %d-%m-%Y")}  to {end_time.strftime("%H:%M CET %d-%m-%Y")} """
             )
         if observed_time != analysis.next_24h_forecast.index[0]:
-            obs_message_prefix = f""" (Observed Kp data available up to {datetime.strptime(observed_time.strip(), "T%H:%M:%SZ %d-%m-%Y").strftime("%H:%M %d-%m-%Y")} CET)"""
+            obs_message_prefix = f""" (Observed Kp data available up to {datetime.strptime(observed_time.strip(), "%Y-%m-%dT%H:%M:%SZ").strftime("%Y-%m-%d %H:%M")} UTC)"""
         else:
             obs_message_prefix = ""
 
