@@ -376,7 +376,7 @@ In no event will GFZ be liable for any damages direct, indirect, incidental, or 
         end_time_kp_max_status, _, _ = self.get_status_level_color(high_records.loc[end_time]["maximum"].max())
 
         if start_time == end_time:
-            message_prefix = f"""At {start_time.strftime("%H:%M (CET) %d-%m-%Y")} """
+            message_prefix = f"""At {start_time.strftime("%H:%M (CET) %d.%m.%Y")} """
         else:
             message_prefix = (
                 f"""From {start_time.strftime("%H:%M (CET) %d-%m-%Y")}  to {end_time.strftime("%H:%M (CET) %d-%m-%Y")} """
