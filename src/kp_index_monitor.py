@@ -94,10 +94,10 @@ class KpMonitor:
     for geomagnetic activity monitoring.
     """
 
-    IMAGE_PATH = "/Users/infantronald/work/KP index/KpAlert/mock_files/kp_swift_ensemble_LAST.png"
-    IMAGE_PATH_SWPC = "/Users/infantronald/work/KP index/KpAlert/mock_files/kp_swift_ensemble_with_swpc_LAST.png"
-    CSV_PATH = "/Users/infantronald/work/KP index/KpAlert/mock_files/kp_product_file_SWIFT_LAST.csv"
-    VIDEO_PATH_AURORA = "/Users/infantronald/work/KP index/KpAlert/mock_files/aurora_forecast.mp4"
+    IMAGE_PATH = "./assets/kp_swift_ensemble_LAST.png"
+    IMAGE_PATH_SWPC = "./assets/kp_swift_ensemble_with_swpc_LAST.png"
+    CSV_PATH = "./assets/kp_product_file_SWIFT_LAST.csv"
+    VIDEO_PATH_AURORA = "./assets/aurora_forecast.mp4"
 
     # Caption for the forecast plot (SWPC + Min-Max)
     FORECAST_IMAGE_CAPTION = (
