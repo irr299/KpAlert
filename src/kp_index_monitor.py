@@ -22,6 +22,10 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
 from typing import Optional, Tuple
+from zoneinfo import ZoneInfo
+
+# Display times in CET (Europe/Berlin handles CET/CEST)
+CET = ZoneInfo("Europe/Berlin")
 
 import markdown
 import numpy as np
@@ -93,12 +97,13 @@ class KpMonitor:
     IMAGE_PATH = "/Users/infantronald/work/KP index/KpAlert/mock_files/kp_swift_ensemble_LAST.png"
     IMAGE_PATH_SWPC = "/Users/infantronald/work/KP index/KpAlert/mock_files/kp_swift_ensemble_with_swpc_LAST.png"
     CSV_PATH = "/Users/infantronald/work/KP index/KpAlert/mock_files/kp_product_file_SWIFT_LAST.csv"
+    VIDEO_PATH_AURORA = "/Users/infantronald/work/KP index/KpAlert/mock_files/aurora_forecast.mp4"
 
     # Caption for the forecast plot (SWPC + Min-Max)
     FORECAST_IMAGE_CAPTION = (
-        "<strong>Caption:</strong> Kp index forecast: bar colours show activity level (green = quiet, yellow = moderate, "
-        "red = high). Red dashed line = SWPC (NOAA) official Kp forecast. Black vertical lines "
-        "on bars = Min–Max range (possible spread of Kp values; longer = more uncertainty)."
+        "<strong>Caption:</strong> KP index forecast: bar colours show activity level green being quiet, yellow being moderate storm, "
+        "red being high strom. For more information refer the table below. Red dashed line = SWPC (NOAA) official KP forecast.  "
+        "Error bars indicates the minimum-maximum spread of KP values."
     )
 
     def __init__(self, config: MonitorConfig, log_suffix: str = "") -> None:
@@ -111,6 +116,7 @@ class KpMonitor:
         self.config.kp_alert_threshold = np.round(self.config.kp_alert_threshold, 2)
         self.kp_threshold_str = DECIMAL_TO_KP[self.config.kp_alert_threshold]
         self.LOCAL_IMAGE_PATH = self.copy_image()
+        self.LOCAL_AURORA_VIDEO_PATH = None  # set when building message with AURORA WATCH
         self.current_utc_time = pd.Timestamp(datetime.now(timezone.utc))
         self.log_suffix = log_suffix
         self.setup_logging()
@@ -127,6 +133,10 @@ class KpMonitor:
         if self.debug_with_swpc:
             return shutil.copy2(self.IMAGE_PATH_SWPC, "./kp_swift_ensemble_with_swpc_LAST.png")
         return shutil.copy2(self.IMAGE_PATH, "./kp_swift_ensemble_LAST.png")
+
+    def copy_aurora_video(self) -> str:
+        """Copy the aurora video to the current directory for html embedding."""
+        return shutil.copy2(self.VIDEO_PATH_AURORA, "./aurora_forecast.mp4")
 
     def setup_logging(self) -> None:
         """
@@ -250,7 +260,7 @@ In no event will GFZ be liable for any damages direct, indirect, incidental, or 
     def _kp_html_table(self, record: pd.DataFrame, probabilities: pd.DataFrame) -> str:
         """Generate markdown table for Kp index records."""
         table = f"""
-| Time (UTC) | Probability (Kp ≥ {self.kp_threshold_str}) | Min Kp Index<sup>[<a href="#fn1">1</a>]</sup> | Max Kp Index<sup>[<a href="#fn2">2</a>]</sup> | Median Kp Index<sup>[<a href="#fn3">3</a>]</sup> | Activity<sup>[<a href="#fn4">4</a>][<a href="#fn5">5</a>]</sup> |
+| Time (CET) | Probability (Kp ≥ {self.kp_threshold_str}) | Min Kp Index<sup>[<a href="#fn1">1</a>]</sup> | Max Kp Index<sup>[<a href="#fn2">2</a>]</sup> | Median Kp Index<sup>[<a href="#fn3">3</a>]</sup> | Activity<sup>[<a href="#fn4">4</a>][<a href="#fn5">5</a>]</sup> |
 |------------|-------------------------------------------|------------------|------------------|---------------------|------------------|
 """
         for _, row in record.iterrows():
@@ -263,7 +273,7 @@ In no event will GFZ be liable for any damages direct, indirect, incidental, or 
             time_idx = row["Time (UTC)"]
             prob = probabilities.loc[time_idx, "Probability"]
 
-            time_str = row["Time (UTC)"].strftime("%Y-%m-%d %H:%M")
+            time_str = row["Time (UTC)"].tz_convert(CET).strftime("%Y-%m-%d %H:%M")
             prob_str = f"{prob * 100:.0f}%"
             activity_str = f'<span style="color: {color_min};">{level_min}</span> - <span style="color: {color_max};">{level_max}</span>'
 
@@ -375,24 +385,27 @@ In no event will GFZ be liable for any damages direct, indirect, incidental, or 
         start_time_kp_min_status, _, _ = self.get_status_level_color(high_records.loc[start_time]["minimum"].min())
         end_time_kp_max_status, _, _ = self.get_status_level_color(high_records.loc[end_time]["maximum"].max())
 
+        start_cet = start_time.tz_convert(CET)
+        end_cet = end_time.tz_convert(CET)
         if start_time == end_time:
-            message_prefix = f"""At {start_time.strftime("%H:%M (CET) %d.%m.%Y")} """
+            message_prefix = f"""At {start_cet.strftime("%H:%M (CET) %d.%m.%Y")} """
         else:
             message_prefix = (
-                f"""From {start_time.strftime("%H:%M (CET) %d-%m-%Y")}  to {end_time.strftime("%H:%M (CET) %d-%m-%Y")} """
+                f"""From {start_cet.strftime("%H:%M (CET) %d.%m.%Y")}  to {end_cet.strftime("%H:%M (CET) %d.%m.%Y")}"""
             )
         if observed_time != analysis.next_24h_forecast.index[0]:
-            obs_message_prefix = f""" (Observed Kp data available up to {datetime.strptime(observed_time.strip(), "%Y-%m-%dT%H:%M:%SZ").strftime("%H:%M CET %d-%m-%Y")})"""
+            obs_utc = datetime.strptime(observed_time.strip(), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+            obs_message_prefix = f""" (Observed Kp data available up to {obs_utc.astimezone(CET).strftime("%H:%M CET %d.%m.%Y")})"""
         else:
             obs_message_prefix = ""
 
         # Use "=" for Kp 9 (maximum value), "≥" for all other values
         kp_comparison = "=" if max_kp_at_finite_time == 9 else "≥"
 
-        message = f"""<h2 style="color: #d9534f;">SPACE WEATHER ALERT - {end_time_kp_max_status} ({max_kp_at_finite_time_level}) with ≥ {prob_at_start_time * 100:.0f}% probability Predicted</h2>
+        message = f"""<h2 style="color: #d9534f;">SPACE WEATHER ALERT - {end_time_kp_max_status} ({max_kp_at_finite_time_level}) with probability ≥ {prob_at_start_time * 100:.0f}% predicted</h2>
 
 
-### {message_prefix}, space weather conditions can reach {end_time_kp_max_status} with Kp {kp_comparison} {DECIMAL_TO_KP[max_kp_at_finite_time]} ({max_kp_at_finite_time_level}) with ≥ {prob_at_start_time * 100:.0f}% probability.
+### {message_prefix}, space weather can reach {end_time_kp_max_status} with Kp {kp_comparison} {DECIMAL_TO_KP[max_kp_at_finite_time]} with probability ≥ {prob_at_start_time * 100:.0f}%.
 
 **Current Conditions:** {observed_status.replace("CONDITIONS", "")} {obs_message_prefix}
 
@@ -401,7 +414,7 @@ In no event will GFZ be liable for any damages direct, indirect, incidental, or 
 <p class="forecast-caption">{self.FORECAST_IMAGE_CAPTION}</p>
 
 ## **ALERT SUMMARY**
-- **Alert sent at:** {datetime.now(timezone.utc).strftime("%H:%M CET %d-%m-%Y ")}
+- **Alert sent at:** {datetime.now(timezone.utc).astimezone(CET).strftime("%H:%M CET %d.%m.%Y ")}
 - **{high_prob_value * 100:.0f}% Probability of {end_time_kp_max_status} ({max_kp_at_finite_time_level}) within next {prob_at_time} hours**
 
 
@@ -419,11 +432,16 @@ In no event will GFZ be liable for any damages direct, indirect, incidental, or 
             message += f"""
 ## **AURORA WATCH:**
 
+<video width="800" controls autoplay loop muted>
+  <source src="aurora_forecast.mp4" type="video/mp4">
+  Your browser does not support the video tag.
+</video>
+
 **Note:** Kp ≥ {DECIMAL_TO_KP[AURORA_KP]} indicate potential auroral activity at Berlin latitudes.
 
 """
 
-        message += """## GEOMAGNETIC ACTIVITY SCALE <a id="fn5"></a><sup>5</sup>"""
+        message += """## GEOMAGNETIC ACTIVITY SCALE"""
         message += self.get_storm_level_description_table()
         message += "\n"
         message += self.footer()
@@ -602,8 +620,9 @@ In no event will GFZ be liable for any damages direct, indirect, incidental, or 
             message = self.create_message(analysis)
             subject = self.create_subject(analysis)
 
-            email_sent = self.send_alert(subject, message)
             _ = self.copy_image()
+            self.LOCAL_AURORA_VIDEO_PATH = self.copy_aurora_video()
+            email_sent = self.send_alert(subject, message)
             message_for_file = markdown.markdown(
                 message.replace("cid:forecast_image", self.LOCAL_IMAGE_PATH),
                 extensions=["tables", "fenced_code", "footnotes", "nl2br"],
@@ -668,6 +687,9 @@ In no event will GFZ be liable for any damages direct, indirect, incidental, or 
             img.add_header("Content-ID", "<forecast_image>")
             img.add_header("Content-Disposition", "inline", filename="forecast_image.png")
             msg_root.attach(img)
+
+        # Note: Video attachments are not well supported in email clients
+        # The video will be available in the generated HTML file
 
         with smtplib.SMTP("localhost") as smtp:
             smtp.send_message(msg_root)
