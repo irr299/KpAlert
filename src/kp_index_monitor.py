@@ -100,11 +100,7 @@ class KpMonitor:
     VIDEO_PATH_AURORA = "./assets/aurora_forecast.mp4"
 
     # Caption for the forecast plot (SWPC + Min-Max)
-    FORECAST_IMAGE_CAPTION = (
-        "<strong>Caption:</strong> KP index forecast: bar colours show activity level green being quiet, yellow being moderate storm, "
-        "red being high strom. For more information refer the table below. Red dashed line = SWPC (NOAA) official KP forecast.  "
-        "Error bars indicates the minimum-maximum spread of KP values."
-    )
+    FORECAST_IMAGE_CAPTION = "Bar colours indicate geomagnetic activity levels: green corresponds to quiet conditions (Kp &lt; 3), yellow to moderate activity (3 &lt; Kp &le; 6), and red to high storm conditions (Kp &gt; 6). The red dashed line shows the official NOAA SWPC Kp forecast. Error bars represent the minimum-maximum spread of forecast Kp values."
 
     def __init__(self, config: MonitorConfig, log_suffix: str = "") -> None:
         self.last_alert_time = None
@@ -156,7 +152,7 @@ class KpMonitor:
 
         logging.basicConfig(
             level=self.config.log_level,
-            format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+            format="[%(levelname)-8s] %(asctime)s - %(name)s:%(lineno)d - %(message)s",
             handlers=[
                 logging.FileHandler(
                     self.log_folder
@@ -167,29 +163,71 @@ class KpMonitor:
         )
         self.logger = logging.getLogger(__name__)
 
-    def fetch_kp_data(self) -> Optional[pd.DataFrame]:
+    def fetch_kp_data(self, test: bool = False) -> Optional[pd.DataFrame]:
         """
         Fetch current Kp index forecast data from GFZ website.
+        Parameters
+        ----------
+        test : bool, optional
+            If True, create a test DataFrame with synthetic data instead of reading from CSV, by default False
 
         Returns
         -------
         pd.DataFrame or None
             DataFrame containing forecast data or None if fetch fails
         """
-        try:
-            df = pd.read_csv(self.CSV_PATH)
+        if not test:
+            try:
+                df = pd.read_csv(self.CSV_PATH)
 
-            df["Time (UTC)"] = pd.to_datetime(df["Time (UTC)"], format="%d-%m-%Y %H:%M", dayfirst=True, utc=True)
-            df.index = df["Time (UTC)"]
-            self.logger.info(f"Successfully fetched {len(df)} records")
-            return df
+                df["Time (UTC)"] = pd.to_datetime(df["Time (UTC)"], format="%d-%m-%Y %H:%M", dayfirst=True, utc=True)
+                df.index = df["Time (UTC)"]
+                self.logger.info(f"Successfully fetched {len(df)} records")
+                return df
 
-        except pd.errors.EmptyDataError:
-            self.logger.error("Received empty CSV file")
-            return None
-        except Exception as e:
-            self.logger.error(f"Unexpected error: {e}", exc_info=True)
-            return None
+            except pd.errors.EmptyDataError:
+                self.logger.error("Received empty CSV file")
+                return None
+            except Exception as e:
+                self.logger.error(f"Unexpected error: {e}", exc_info=True)
+                return None
+        else:
+            self.logger.info("Running in test mode - generating synthetic Kp data")
+            return self.get_test_data()
+
+    def round_to_step(self, x, step=0.33):
+        return np.round(x / step) * step
+
+    def get_test_data(self) -> pd.DataFrame:
+        time_index = pd.date_range(start=self.current_utc_time, periods=10, freq="3h")
+
+        data = {"Time (UTC)": time_index}
+
+        kp_members = []
+
+        for i in range(20):
+            vals = np.round(np.random.choice(np.linspace(0, 9, 28), len(time_index)), 2)
+            data[f"kp_{i}"] = vals
+            kp_members.append(vals)
+
+        kp_array = np.vstack(kp_members).T
+
+        data["minimum"] = np.min(kp_array, axis=1)
+        data["0.25-quantile"] = np.quantile(kp_array, 0.25, axis=1)
+        data["median"] = np.median(kp_array, axis=1)
+        data["0.75-quantile"] = np.quantile(kp_array, 0.75, axis=1)
+        data["maximum"] = np.max(kp_array, axis=1)
+
+        data["prob 4-5"] = np.mean((kp_array >= 4) & (kp_array < 5), axis=1)
+        data["prob 5-6"] = np.mean((kp_array >= 5) & (kp_array < 6), axis=1)
+        data["prob 6-7"] = np.mean((kp_array >= 6) & (kp_array < 7), axis=1)
+        data["prob 7-8"] = np.mean((kp_array >= 7) & (kp_array < 8), axis=1)
+        data["prob >= 8"] = np.mean(kp_array >= 8, axis=1)
+
+        df = pd.DataFrame(data)
+        df.index = df["Time (UTC)"]
+
+        return df
 
     def analyze_kp_data(self, df: pd.DataFrame) -> AnalysisResults:
         """
@@ -210,7 +248,6 @@ class KpMonitor:
             self.logger.info(f"Current UTC Time: {self.current_utc_time}")
             max_values = df[df.index >= self.current_utc_time]["maximum"]
             max: float = np.round(max_values.max(), 2)
-
             self.ensembles = [col for col in df.columns if re.match(r"kp_\d+", col)]
             self.total_ensembles = len(self.ensembles)
             probability = np.sum(df[self.ensembles] >= self.config.kp_alert_threshold, axis=1) / self.total_ensembles
@@ -365,7 +402,9 @@ In no event will GFZ be liable for any damages direct, indirect, incidental, or 
 
         max_kp_at_finite_time = np.round(max_values.max(), 2)
 
-        max_kp_at_finite_time_status, max_kp_at_finite_time_level, _ = self.get_status_level_color(max_kp_at_finite_time)
+        max_kp_at_finite_time_status, max_kp_at_finite_time_level, _ = self.get_status_level_color(
+            max_kp_at_finite_time
+        )
         mask = probability_df["Probability"] >= 0.4
         if mask.any():
             start_time = probability_df.index[mask][0]
@@ -395,7 +434,9 @@ In no event will GFZ be liable for any damages direct, indirect, incidental, or 
             )
         if observed_time != analysis.next_24h_forecast.index[0]:
             obs_utc = datetime.strptime(observed_time.strip(), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
-            obs_message_prefix = f""" (Observed Kp data available up to {obs_utc.astimezone(CET).strftime("%H:%M CET %d.%m.%Y")})"""
+            obs_message_prefix = (
+                f""" (Observed Kp data available up to {obs_utc.astimezone(CET).strftime("%H:%M CET %d.%m.%Y")})"""
+            )
         else:
             obs_message_prefix = ""
 
@@ -419,7 +460,7 @@ In no event will GFZ be liable for any damages direct, indirect, incidental, or 
 
 
 """
-        #message += self._kp_html_table(high_records, probability_df)
+        # message += self._kp_html_table(high_records, probability_df)
 
         AURORA_KP = 7
         high_records_above_threshold = high_records[
@@ -437,7 +478,7 @@ In no event will GFZ be liable for any damages direct, indirect, incidental, or 
   Your browser does not support the video tag.
 </video>
 
-**Note:** Kp ≥ {DECIMAL_TO_KP[AURORA_KP]} indicate potential auroral activity at Berlin latitudes.
+**Note:** Kp ≥ {DECIMAL_TO_KP[AURORA_KP]} indicate potential auroral activity at Berlin latitudes. Time indicated in UTC.
 
 """
 
@@ -597,11 +638,15 @@ In no event will GFZ be liable for any damages direct, indirect, incidental, or 
 
         return True
 
-    def run_single_check(self) -> bool:
+    def run_single_check(self, test: bool = False) -> bool:
         """
         Execute a single monitoring check cycle.
 
         Fetches Kp data, analyzes it, and sends alerts if necessary.
+        Parameters
+        ----------
+        test : bool, optional
+            If True, runs in test mode with synthetic data, by default False
 
         Returns
         -------
@@ -609,7 +654,7 @@ In no event will GFZ be liable for any damages direct, indirect, incidental, or 
             True if check completed successfully, False otherwise
         """
         self.logger.info("Kp Index check")
-        df = self.fetch_kp_data()
+        df = self.fetch_kp_data(test=test)
         if df is None:
             return False
         analysis = self.analyze_kp_data(df)
@@ -708,7 +753,7 @@ In no event will GFZ be liable for any damages direct, indirect, incidental, or 
                     h1 {{ color: #d9534f; font-size: 1.5rem; }}
                     h2 {{ color: #5bc0de; margin-top: 30px; font-size: 1.25rem; }}
                     h3 {{ color: #000000; font-size: 1.1rem; }}
-                    .forecast-caption {{ font-size: 12px; color: #555; margin-top: 4px; }}
+                    .forecast-caption {{ font-size: 16px; color: #444444; margin-top: 4px;}}
                     small {{ font-size: 11px; color: #333; }}
                     hr {{ border: 0; border-top: 1px solid #ddd; margin: 20px 0; }}
                 </style>
@@ -756,24 +801,27 @@ app = typer.Typer(help="Kp Index Space Weather Monitor", add_completion=False, p
 def main(
     once: bool = typer.Option(False, "--once", help="Run single check and exit"),
     continuous: bool = typer.Option(False, "--continuous", help="Run continuous monitoring"),
+    test: bool = typer.Option(False, "--test", help="Run test mode with sample data"),
 ):
     """
     Main function with command line interface.
     """
-    selected = [flag for flag in (once, continuous) if flag]
+    selected = [flag for flag in (once, continuous, test) if flag]
     if len(selected) == 0:
-        raise typer.BadParameter("One of --once or --continuous must be specified")
+        raise typer.BadParameter("One of --once, --continuous, or --test must be specified")
     if len(selected) > 1:
         raise typer.BadParameter(
-            "Options --once and --continuous are mutually exclusive i.e., only one can be selected."
+            "Options --once, --continuous, and --test are mutually exclusive i.e., only one can be selected."
         )
 
     config = MonitorConfig.from_yaml()
-    log_suffix = "once" if once else "continuous"
+    log_suffix = "once" if once else "continuous" if not test else "test"
     monitor = KpMonitor(config, log_suffix=log_suffix)
 
     if once:
-        monitor.run_single_check()
+        monitor.run_single_check(test=False)
+    elif test:
+        monitor.run_single_check(test=True)
 
     elif continuous:
         monitor.run_continuous_monitoring()
