@@ -22,6 +22,10 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
 from typing import Optional, Tuple
+from zoneinfo import ZoneInfo
+
+# Display times in CET (Europe/Berlin handles CET/CEST)
+CET = ZoneInfo("Europe/Berlin")
 
 import markdown
 import numpy as np
@@ -51,6 +55,8 @@ class AnalysisResults:
         Boolean indicating if alert should be sent
     probability_df : pd.DataFrame
         DataFrame containing probability of Kp exceeding threshold
+    storm_prob_df : pd.DataFrame
+        DataFrame containing storm probabilities (prob 6-7, prob 7-8, prob >= 8)
     """
 
     max_kp: float
@@ -60,6 +66,7 @@ class AnalysisResults:
     next_24h_forecast: pd.DataFrame
     alert_worthy: bool
     probability_df: pd.DataFrame
+    storm_prob_df: pd.DataFrame
 
     def __getitem__(self, key):
         return getattr(self, key)
@@ -90,9 +97,14 @@ class KpMonitor:
     for geomagnetic activity monitoring.
     """
 
-    IMAGE_PATH = "/PAGER/FLAG/data/published/kp_swift_ensemble_LAST.png"
-    IMAGE_PATH_SWPC = "/PAGER/FLAG/data/published/kp_swift_ensemble_with_swpc_LAST.png"
-    CSV_PATH = "/PAGER/FLAG/data/published/products/Kp/kp_product_file_SWIFT_LAST.csv"
+    IMAGE_PATH = "./assets/kp_swift_ensemble_LAST.png"
+    IMAGE_PATH_SWPC = "./assets/kp_swift_ensemble_with_swpc_LAST.png"
+    CSV_PATH = "./assets/kp_product_file_SWIFT_LAST.csv"
+    VIDEO_PATH_AURORA = "./assets/aurora_forecast.mp4"
+    IMAGE_PATH_AURORA = "./assets/aurora_LAST.png"
+
+    # Caption for the forecast plot (SWPC + Min-Max)
+    FORECAST_IMAGE_CAPTION = "Bar colours indicate geomagnetic activity levels: green corresponds to quiet conditions (Kp &lt; 3), yellow to moderate activity (3 &lt; Kp &le; 6), and red to high storm conditions (Kp &gt; 6). The red dashed line shows the official NOAA SWPC Kp forecast. Error bars represent the minimum-maximum spread of forecast Kp values."
 
     def __init__(self, config: MonitorConfig, log_suffix: str = "") -> None:
         self.last_alert_time = None
@@ -104,6 +116,7 @@ class KpMonitor:
         self.config.kp_alert_threshold = np.round(self.config.kp_alert_threshold, 2)
         self.kp_threshold_str = DECIMAL_TO_KP[self.config.kp_alert_threshold]
         self.LOCAL_IMAGE_PATH = self.copy_image()
+        self.LOCAL_AURORA_VIDEO_PATH = None  # set when building message with AURORA WATCH
         self.current_utc_time = pd.Timestamp(datetime.now(timezone.utc))
         self.log_suffix = log_suffix
         self.setup_logging()
@@ -120,6 +133,14 @@ class KpMonitor:
         if self.debug_with_swpc:
             return shutil.copy2(self.IMAGE_PATH_SWPC, "./kp_swift_ensemble_with_swpc_LAST.png")
         return shutil.copy2(self.IMAGE_PATH, "./kp_swift_ensemble_LAST.png")
+
+    def copy_aurora_video(self) -> str:
+        """Copy the aurora video to the current directory for html embedding."""
+        return shutil.copy2(self.VIDEO_PATH_AURORA, "./aurora_forecast.mp4")
+
+    def copy_aurora_image(self) -> str:
+        """Copy the Kp-dependent auroral intensity image to the current directory for html embedding."""
+        return shutil.copy2(self.IMAGE_PATH_AURORA, "./aurora_LAST.png")
 
     def setup_logging(self) -> None:
         """
@@ -139,7 +160,7 @@ class KpMonitor:
 
         logging.basicConfig(
             level=self.config.log_level,
-            format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+            format="[%(levelname)-8s] %(asctime)s - %(name)s:%(lineno)d - %(message)s",
             handlers=[
                 logging.FileHandler(
                     self.log_folder
@@ -150,29 +171,74 @@ class KpMonitor:
         )
         self.logger = logging.getLogger(__name__)
 
-    def fetch_kp_data(self) -> Optional[pd.DataFrame]:
+    def fetch_kp_data(self, test: bool = False) -> Optional[pd.DataFrame]:
         """
         Fetch current Kp index forecast data from GFZ website.
+
+        Parameters
+        ----------
+        test : bool, optional
+            If True, create a test DataFrame with synthetic data instead of reading from CSV, by default False
 
         Returns
         -------
         pd.DataFrame or None
             DataFrame containing forecast data or None if fetch fails
         """
-        try:
-            df = pd.read_csv(self.CSV_PATH)
+        if not test:
+            try:
+                df = pd.read_csv(self.CSV_PATH)
 
-            df["Time (UTC)"] = pd.to_datetime(df["Time (UTC)"], format="%d-%m-%Y %H:%M", dayfirst=True, utc=True)
-            df.index = df["Time (UTC)"]
-            self.logger.info(f"Successfully fetched {len(df)} records")
-            return df
+                df["Time (UTC)"] = pd.to_datetime(df["Time (UTC)"], format="%d-%m-%Y %H:%M", dayfirst=True, utc=True)
+                df.index = df["Time (UTC)"]
+                self.logger.info(f"Successfully fetched {len(df)} records")
+                return df
 
-        except pd.errors.EmptyDataError:
-            self.logger.error("Received empty CSV file")
-            return None
-        except Exception as e:
-            self.logger.error(f"Unexpected error: {e}", exc_info=True)
-            return None
+            except pd.errors.EmptyDataError:
+                self.logger.error("Received empty CSV file")
+                return None
+            except Exception as e:
+                self.logger.error(f"Unexpected error: {e}", exc_info=True)
+                return None
+        else:
+            self.logger.info("Running in test mode - generating synthetic Kp data")
+            return self.get_test_data()
+
+    def round_to_step(self, x, step=0.33):
+        """Round value to nearest step (e.g. Kp index steps)."""
+        return np.round(x / step) * step
+
+    def get_test_data(self) -> pd.DataFrame:
+        """Generate synthetic Kp forecast data for testing without real CSV."""
+        time_index = pd.date_range(start=self.current_utc_time, periods=10, freq="3h")
+
+        data = {"Time (UTC)": time_index}
+
+        kp_members = []
+
+        for i in range(20):
+            vals = np.round(np.random.choice(np.linspace(0, 9, 28), len(time_index)), 2)
+            data[f"kp_{i}"] = vals
+            kp_members.append(vals)
+
+        kp_array = np.vstack(kp_members).T
+
+        data["minimum"] = np.min(kp_array, axis=1)
+        data["0.25-quantile"] = np.quantile(kp_array, 0.25, axis=1)
+        data["median"] = np.median(kp_array, axis=1)
+        data["0.75-quantile"] = np.quantile(kp_array, 0.75, axis=1)
+        data["maximum"] = np.max(kp_array, axis=1)
+
+        data["prob 4-5"] = np.mean((kp_array >= 4) & (kp_array < 5), axis=1)
+        data["prob 5-6"] = np.mean((kp_array >= 5) & (kp_array < 6), axis=1)
+        data["prob 6-7"] = np.mean((kp_array >= 6) & (kp_array < 7), axis=1)
+        data["prob 7-8"] = np.mean((kp_array >= 7) & (kp_array < 8), axis=1)
+        data["prob >= 8"] = np.mean(kp_array >= 8, axis=1)
+
+        df = pd.DataFrame(data)
+        df.index = df["Time (UTC)"]
+
+        return df
 
     def analyze_kp_data(self, df: pd.DataFrame) -> AnalysisResults:
         """
@@ -192,6 +258,30 @@ class KpMonitor:
             # Get current maximum values
             self.logger.info(f"Current UTC Time: {self.current_utc_time}")
             max_values = df[df.index >= self.current_utc_time]["maximum"]
+
+            if max_values.empty or np.isnan(max_values.max()):
+                # No forecast entries at / after current time – treat as no alert case
+                self.logger.warning("No forecast data at or after current time; skipping alert analysis.")
+                probability = pd.Series(0.0, index=df.index, name="Probability")
+                probability_df = pd.DataFrame({"Time (UTC)": df["Time (UTC)"], "Probability": probability})
+                probability_df.index = probability_df["Time (UTC)"]
+                probability_df.drop(columns=["Time (UTC)"], inplace=True)
+
+                empty = df.iloc[0:0].copy()
+                storm_prob_df = pd.DataFrame(
+                    columns=["Time (UTC)", "Probability 6-7", "Probability 7-8", "Probability >= 8"]
+                )
+                return AnalysisResults(
+                    max_kp=float("nan"),
+                    max_df=max_values,
+                    threshold_exceeded=False,
+                    high_kp_records=empty,
+                    next_24h_forecast=empty,
+                    alert_worthy=False,
+                    probability_df=probability_df.round(2),
+                    storm_prob_df=storm_prob_df,
+                )
+
             max: float = np.round(max_values.max(), 2)
 
             self.ensembles = [col for col in df.columns if re.match(r"kp_\d+", col)]
@@ -208,6 +298,9 @@ class KpMonitor:
             probability_df.index = probability_df["Time (UTC)"]
             probability_df.drop(columns=["Time (UTC)"], inplace=True)
             probability_df = probability_df.replace({"Probability": {1.0: 0.95}})
+
+            storm_prob_df = df[df.index >= self.current_utc_time][["prob 6-7", "prob 7-8", "prob >= 8"]].copy()
+
             analysis = AnalysisResults(
                 max_kp=max,
                 max_df=max_values,
@@ -216,16 +309,37 @@ class KpMonitor:
                 next_24h_forecast=next_24h.round(2),
                 alert_worthy=len(high_kp_records) > 0,
                 probability_df=probability_df.round(2),
+                storm_prob_df=storm_prob_df,
             )
 
-            self.logger.info(
-                f"Analysis complete - Current Kp: {DECIMAL_TO_KP[max]}, Alert: {analysis['alert_worthy']}, Threshold: {self.kp_threshold_str}"
-            )
+            if not np.isnan(max):
+                self.logger.info(
+                    f"Analysis complete - Current Kp: {DECIMAL_TO_KP[max]}, Alert: {analysis['alert_worthy']}, Threshold: {self.kp_threshold_str}"
+                )
+            else:
+                self.logger.info(
+                    f"Analysis complete - Current Kp: nan, Alert: {analysis['alert_worthy']}, Threshold: {self.kp_threshold_str}"
+                )
             return analysis
 
         except Exception as e:
             self.logger.error(f"Error analyzing data: {e}", exc_info=True)
-            return {"alert_worthy": False, "max_kp": 0}
+            empty = df.iloc[0:0].copy()
+            probability = pd.Series(0.0, index=df.index, name="Probability")
+            probability_df = pd.DataFrame({"Time (UTC)": df["Time (UTC)"], "Probability": probability})
+            probability_df.index = probability_df["Time (UTC)"]
+            probability_df.drop(columns=["Time (UTC)"], inplace=True)
+            storm_prob_df = pd.DataFrame(columns=["Time (UTC)", "Prob Kp 6-7", "Prob 7-8", "Prob Kp >= 8"])
+            return AnalysisResults(
+                max_kp=float("nan"),
+                max_df=pd.Series(dtype=float),
+                threshold_exceeded=False,
+                high_kp_records=empty,
+                next_24h_forecast=empty,
+                alert_worthy=False,
+                probability_df=probability_df.round(2),
+                storm_prob_df=storm_prob_df,
+            )
 
     def footer(self) -> str:
         return f"""
@@ -243,7 +357,7 @@ In no event will GFZ be liable for any damages direct, indirect, incidental, or 
     def _kp_html_table(self, record: pd.DataFrame, probabilities: pd.DataFrame) -> str:
         """Generate markdown table for Kp index records."""
         table = f"""
-| Time (UTC) | Probability (Kp ≥ {self.kp_threshold_str}) | Min Kp Index<sup>[<a href="#fn1">1</a>]</sup> | Max Kp Index<sup>[<a href="#fn2">2</a>]</sup> | Median Kp Index<sup>[<a href="#fn3">3</a>]</sup> | Activity<sup>[<a href="#fn4">4</a>][<a href="#fn5">5</a>]</sup> |
+| Time (CET) | Probability (Kp ≥ {self.kp_threshold_str}) | Min Kp Index<sup>[<a href="#fn1">1</a>]</sup> | Max Kp Index<sup>[<a href="#fn2">2</a>]</sup> | Median Kp Index<sup>[<a href="#fn3">3</a>]</sup> | Activity<sup>[<a href="#fn4">4</a>][<a href="#fn5">5</a>]</sup> |
 |------------|-------------------------------------------|------------------|------------------|---------------------|------------------|
 """
         for _, row in record.iterrows():
@@ -256,7 +370,7 @@ In no event will GFZ be liable for any damages direct, indirect, incidental, or 
             time_idx = row["Time (UTC)"]
             prob = probabilities.loc[time_idx, "Probability"]
 
-            time_str = row["Time (UTC)"].strftime("%Y-%m-%d %H:%M")
+            time_str = row["Time (UTC)"].tz_convert(CET).strftime("%d.%m.%Y %H:%M")
             prob_str = f"{prob * 100:.0f}%"
             activity_str = f'<span style="color: {color_min};">{level_min}</span> - <span style="color: {color_max};">{level_max}</span>'
 
@@ -268,6 +382,36 @@ In no event will GFZ be liable for any damages direct, indirect, incidental, or 
 <a id="fn3"></a><sup>3</sup> Median Kp Index: Median value of Kp Ensembles  
 <a id="fn4"></a><sup>4</sup> Geomagnetic Activity Level based on Min-Max range
 """
+        return table
+
+    def _storm_probability_table(self, storm_prob_df: pd.DataFrame) -> str:
+        """Generate markdown table for storm probabilities (Kp 6-7, 7-8, >=8)."""
+        if storm_prob_df.empty:
+            return ""
+
+        filtered_rows = []
+        for idx, row in storm_prob_df.iterrows():
+            total_prob = row["prob 6-7"] + row["prob 7-8"] + row["prob >= 8"]
+            if total_prob > 0.50:
+                filtered_rows.append((idx, row))
+
+        if not filtered_rows:
+            return ""
+
+        table = """
+## STORM PROBABILITY FORECAST (Kp ≥ 6)
+
+| Time (CET) | Probability of kp 6-7 | Probability of kp 7-8 | Probability of kp ≥8 |
+|------------|----------|----------|---------|
+"""
+        for idx, row in filtered_rows:
+            time_cet = idx.tz_convert(CET).strftime("%d.%m.%Y %H:%M")
+            prob_6_7 = f"{row['prob 6-7'] * 100:.0f}%"
+            prob_7_8 = f"{row['prob 7-8'] * 100:.0f}%"
+            prob_8_plus = f"{row['prob >= 8'] * 100:.0f}%"
+            table += f"| {time_cet} | {prob_6_7} | {prob_7_8} | {prob_8_plus} |\n"
+
+        table += "\n*Showing timestamps where combined probability of Kp ≥ 6 exceeds 50%*\n"
         return table
 
     def get_observed_kp(self, start: pd.Timestamp) -> Tuple[str, float] | None:
@@ -348,7 +492,9 @@ In no event will GFZ be liable for any damages direct, indirect, incidental, or 
 
         max_kp_at_finite_time = np.round(max_values.max(), 2)
 
-        max_kp_at_finite_time_status, _, _ = self.get_status_level_color(max_kp_at_finite_time)
+        max_kp_at_finite_time_status, max_kp_at_finite_time_level, _ = self.get_status_level_color(
+            max_kp_at_finite_time
+        )
         mask = probability_df["Probability"] >= 0.4
         if mask.any():
             start_time = probability_df.index[mask][0]
@@ -368,39 +514,55 @@ In no event will GFZ be liable for any damages direct, indirect, incidental, or 
         start_time_kp_min_status, _, _ = self.get_status_level_color(high_records.loc[start_time]["minimum"].min())
         end_time_kp_max_status, _, _ = self.get_status_level_color(high_records.loc[end_time]["maximum"].max())
 
+        start_cet = start_time.tz_convert(CET)
+        end_cet = end_time.tz_convert(CET)
         if start_time == end_time:
-            message_prefix = f"""At {start_time.strftime("%Y-%m-%d %H:%M")} UTC"""
+            message_prefix = f"""At {start_cet.strftime("%H:%M (CET) %d.%m.%Y")} """
         else:
             message_prefix = (
-                f"""From {start_time.strftime("%Y-%m-%d %H:%M")} UTC to {end_time.strftime("%Y-%m-%d %H:%M")} UTC"""
+                f"""From {start_cet.strftime("%H:%M (CET) %d.%m.%Y")}  to {end_cet.strftime("%H:%M (CET) %d.%m.%Y")}"""
             )
         if observed_time != analysis.next_24h_forecast.index[0]:
-            obs_message_prefix = f""" (Observed Kp data available up to {datetime.strptime(observed_time.strip(), "%Y-%m-%dT%H:%M:%SZ").strftime("%Y-%m-%d %H:%M")} UTC)"""
+            obs_utc = datetime.strptime(observed_time.strip(), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+            obs_message_prefix = (
+                f""" (Observed Kp data available up to {obs_utc.astimezone(CET).strftime("%H:%M CET %d.%m.%Y")})"""
+            )
         else:
             obs_message_prefix = ""
 
-        message = f"""<h2 style="color: #d9534f;">SPACE WEATHER ALERT - {threshold_status} ({threshold_level}) Predicted</h2>
+        # Use "=" for Kp 9 (maximum value), "≥" for all other values
+        kp_comparison = "=" if max_kp_at_finite_time == 9 else "≥"
+
+        message = f"""<h2 style="color: #d9534f;">SPACE WEATHER ALERT - {end_time_kp_max_status} ({max_kp_at_finite_time_level}) with probability ≥ {prob_at_start_time * 100:.0f}% predicted</h2>
 
 
-### {message_prefix} Kp is expected to be above {self.config.kp_alert_threshold} ({threshold_level}) with ≥ {prob_at_start_time * 100:.0f}% probability with {start_time_kp_min_status.replace("CONDITIONS", "")} to {end_time_kp_max_status}.
+### {message_prefix}, space weather can reach {end_time_kp_max_status} with Kp {kp_comparison} {DECIMAL_TO_KP[max_kp_at_finite_time]} with probability ≥ {prob_at_start_time * 100:.0f}%.
 
-**Current Predicted Conditions:** {status.replace("CONDITIONS", "")}
-**Current Observed Conditions:** {observed_status.replace("CONDITIONS", "")} {obs_message_prefix}
+**Current Conditions:** {observed_status.replace("CONDITIONS", "")} {obs_message_prefix}
 
-## **ALERT SUMMARY**
-
-- **Alert sent at:** {datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")} UTC
-- **Maximum Kp ≥ {DECIMAL_TO_KP[max_kp_at_finite_time]} with {max_kp_at_finite_time_status} may occur** {max_values.idxmax().strftime("%Y-%m-%d %H:%M")} UTC onwards
-- **{high_prob_value * 100:.0f}% Probability of {threshold_status} ({threshold_level}) within next {prob_at_time} hours**
+**Alert sent at:** {datetime.now(timezone.utc).astimezone(CET).strftime("%H:%M CET %d.%m.%Y ")}
 
 ![Forecast Image](cid:forecast_image)
 
-## **HIGH Kp INDEX PERIODS Predicted (Kp ≥ {threshold_level})**
+<p class="forecast-caption">{self.FORECAST_IMAGE_CAPTION}</p>
+
 
 """
-        message += self._kp_html_table(high_records, probability_df)
+        # message += self._kp_html_table(high_records, probability_df)
 
-        AURORA_KP = 6.33
+        # Add storm probability table if there are rows with combined prob > 50%
+        storm_table = self._storm_probability_table(analysis["storm_prob_df"])
+        if storm_table:
+            message += storm_table
+            message += "\n"
+
+        # First add the geomagnetic activity scale section
+        message += """## GEOMAGNETIC ACTIVITY SCALE"""
+        message += self.get_storm_level_description_table()
+        message += "\n"
+
+        # Then optionally add the aurora watch section
+        AURORA_KP = 7
         high_records_above_threshold = high_records[
             (high_records["minimum"].astype(float) >= AURORA_KP)
             | (high_records["median"].astype(float) >= AURORA_KP)
@@ -411,13 +573,22 @@ In no event will GFZ be liable for any damages direct, indirect, incidental, or 
             message += f"""
 ## **AURORA WATCH:**
 
-**Note:** Kp ≥ {DECIMAL_TO_KP[AURORA_KP]} indicate potential auroral activity at Berlin latitudes.
+<div class="aurora-watch-row">
+  <div class="aurora-col">
+    <img src="aurora_LAST.png" alt="Kp-dependent Auroral Intensity Prediction" class="aurora-forecast-img" />
+  </div>
+  <div class="aurora-col">
+    <video class="aurora-forecast-video" controls autoplay loop muted>
+      <source src="aurora_forecast.mp4" type="video/mp4">
+      Your browser does not support the video tag.
+    </video>
+  </div>
+</div>
+
+**Note:** Kp ≥ {DECIMAL_TO_KP[AURORA_KP]} indicate potential auroral activity at Berlin latitudes. Time indicated in UTC.
 
 """
 
-        message += """## GEOMAGNETIC ACTIVITY SCALE <a id="fn5"></a><sup>5</sup>"""
-        message += self.get_storm_level_description_table()
-        message += "\n"
         message += self.footer()
 
         return message.strip()
@@ -571,11 +742,16 @@ In no event will GFZ be liable for any damages direct, indirect, incidental, or 
 
         return True
 
-    def run_single_check(self) -> bool:
+    def run_single_check(self, test: bool = False) -> bool:
         """
         Execute a single monitoring check cycle.
 
         Fetches Kp data, analyzes it, and sends alerts if necessary.
+
+        Parameters
+        ----------
+        test : bool, optional
+            If True, runs in test mode with synthetic data, by default False
 
         Returns
         -------
@@ -583,7 +759,7 @@ In no event will GFZ be liable for any damages direct, indirect, incidental, or 
             True if check completed successfully, False otherwise
         """
         self.logger.info("Kp Index check")
-        df = self.fetch_kp_data()
+        df = self.fetch_kp_data(test=test)
         if df is None:
             return False
         analysis = self.analyze_kp_data(df)
@@ -594,8 +770,10 @@ In no event will GFZ be liable for any damages direct, indirect, incidental, or 
             message = self.create_message(analysis)
             subject = self.create_subject(analysis)
 
-            email_sent = self.send_alert(subject, message)
             _ = self.copy_image()
+            self.LOCAL_AURORA_VIDEO_PATH = self.copy_aurora_video()
+            _ = self.copy_aurora_image()
+            email_sent = self.send_alert(subject, message)
             message_for_file = markdown.markdown(
                 message.replace("cid:forecast_image", self.LOCAL_IMAGE_PATH),
                 extensions=["tables", "fenced_code", "footnotes", "nl2br"],
@@ -661,6 +839,9 @@ In no event will GFZ be liable for any damages direct, indirect, incidental, or 
             img.add_header("Content-Disposition", "inline", filename="forecast_image.png")
             msg_root.attach(img)
 
+        # Note: Video attachments are not well supported in email clients
+        # The video will be available in the generated HTML file
+
         with smtplib.SMTP("localhost") as smtp:
             smtp.send_message(msg_root)
 
@@ -670,16 +851,21 @@ In no event will GFZ be liable for any damages direct, indirect, incidental, or 
             <html>
             <head>
                 <style>
-                    body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #000000; max-width: 1200px; margin: 0 auto; padding: 20px; }}
-                    table {{ border-collapse: collapse; margin: 20px 0; width: 100%; }}
+                    body {{ font-family: Arial, sans-serif; font-size: 14px; line-height: 1.6; color: #000000; max-width: 1200px; margin: 0 auto; padding: 20px; }}
+                    table {{ border-collapse: collapse; margin: 20px 0; width: 100%; font-size: 13px; }}
                     th, td {{ padding: 8px 12px; border: 1px solid #ddd; text-align: left; }}
                     th {{ background-color: #f0f0f0; font-weight: bold; }}
                     img {{ max-width: 100%; height: auto; }}
-                    h1 {{ color: #d9534f; }}
-                    h2 {{ color: #5bc0de; margin-top: 30px; }}
-                    h3 {{ color: #000000; }}
-                    small {{ font-size: 12px; color: #333; }}
+                    h1 {{ color: #d9534f; font-size: 1.5rem; }}
+                    h2 {{ color: #5bc0de; margin-top: 30px; font-size: 1.25rem; }}
+                    h3 {{ color: #000000; font-size: 1.1rem; }}
+                    .forecast-caption {{ font-size: 16px; color: #444444; margin-top: 4px; }}
+                    small {{ font-size: 11px; color: #333; }}
                     hr {{ border: 0; border-top: 1px solid #ddd; margin: 20px 0; }}
+                    .aurora-watch-row {{ display: flex; flex-wrap: wrap; gap: 16px; margin: 16px 0; }}
+                    .aurora-col {{ flex: 1 1 0; min-width: 280px; }}
+                    .aurora-forecast-img {{ width: 100%; height: auto; display: block; }}
+                    .aurora-forecast-video {{ width: 100%; height: auto; display: block; }}
                 </style>
             </head>
             <body>
@@ -703,7 +889,7 @@ In no event will GFZ be liable for any damages direct, indirect, incidental, or 
 
         while True:
             try:
-                self.run_single_check()
+                self.run_single_check(test=False)
 
                 # Wait for next check
                 sleep_seconds = self.config.check_interval_hours * 3600
@@ -725,25 +911,27 @@ app = typer.Typer(help="Kp Index Space Weather Monitor", add_completion=False, p
 def main(
     once: bool = typer.Option(False, "--once", help="Run single check and exit"),
     continuous: bool = typer.Option(False, "--continuous", help="Run continuous monitoring"),
+    test: bool = typer.Option(False, "--test", help="Run test mode with sample data"),
 ):
     """
     Main function with command line interface.
     """
-    selected = [flag for flag in (once, continuous) if flag]
+    selected = [flag for flag in (once, continuous, test) if flag]
     if len(selected) == 0:
-        raise typer.BadParameter("One of --once or --continuous must be specified")
+        raise typer.BadParameter("One of --once, --continuous, or --test must be specified")
     if len(selected) > 1:
         raise typer.BadParameter(
-            "Options --once and --continuous are mutually exclusive i.e., only one can be selected."
+            "Options --once, --continuous, and --test are mutually exclusive i.e., only one can be selected."
         )
 
     config = MonitorConfig.from_yaml()
-    log_suffix = "once" if once else "continuous"
+    log_suffix = "once" if once else "continuous" if not test else "test"
     monitor = KpMonitor(config, log_suffix=log_suffix)
 
     if once:
-        monitor.run_single_check()
-
+        monitor.run_single_check(test=False)
+    elif test:
+        monitor.run_single_check(test=True)
     elif continuous:
         monitor.run_continuous_monitoring()
 
